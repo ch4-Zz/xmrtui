@@ -14,12 +14,13 @@ use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use futures::StreamExt;
+use futures::future::pending;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use tokio::time::interval;
+use tokio::time::{MissedTickBehavior, interval};
 
 use app::{App, Outcome, apply_action};
-use rpc::{WalletRpc, split_wallet_path};
+use rpc::{WalletRpc, default_daemon_address, fetch_snapshot, split_wallet_path};
 
 #[derive(Parser, Debug)]
 #[command(name = "xmrtui", about = "Vim-like TUI over monero-wallet-rpc")]
@@ -29,7 +30,7 @@ struct Cli {
     wallet_file: String,
 
     /// monerod / remote node host:port
-    #[arg(long, default_value = "node.moneroworld.com:18089")]
+    #[arg(long, default_value_t = default_daemon_address())]
     daemon_address: String,
 
     /// Attach to an already running wallet RPC instead of spawning one
@@ -64,9 +65,17 @@ async fn run_tui(app: &mut App) -> Result<()> {
     terminal.clear()?;
 
     let mut events = EventStream::new();
-    let mut ticks = interval(Duration::from_secs(30));
+    let mut ticks = interval(Duration::from_secs(5));
+    ticks.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut inflight: Option<tokio::task::JoinHandle<anyhow::Result<rpc::Snapshot>>> = None;
     let result = loop {
         terminal.draw(|frame| ui::draw(frame, app))?;
+
+        if app.want_refresh && inflight.is_none() {
+            app.want_refresh = false;
+            let client = app.rpc.client.clone();
+            inflight = Some(tokio::spawn(async move { fetch_snapshot(&client).await }));
+        }
 
         tokio::select! {
             maybe_event = events.next() => {
@@ -84,8 +93,21 @@ async fn run_tui(app: &mut App) -> Result<()> {
                 }
             }
             _ = ticks.tick() => {
-                if app.unlocked && !app.busy {
-                    app.reload().await;
+                if app.unlocked && inflight.is_none() {
+                    app.request_refresh();
+                }
+            }
+            res = async {
+                if let Some(handle) = inflight.as_mut() {
+                    handle.await
+                } else {
+                    pending().await
+                }
+            } => {
+                inflight = None;
+                match res {
+                    Ok(snap) => app.apply_snapshot(snap.map_err(|err| err.to_string())),
+                    Err(err) => app.apply_snapshot(Err(err.to_string())),
                 }
             }
         }

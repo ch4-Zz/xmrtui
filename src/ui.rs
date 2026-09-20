@@ -46,7 +46,13 @@ fn draw_tabs(frame: &mut Frame, app: &App, area: Rect) {
     let sync = app
         .snapshot
         .as_ref()
-        .map(|s| format!("height {}", s.height))
+        .map(|s| {
+            if s.daemon_ok {
+                format!("height {}", s.height)
+            } else {
+                format!("height {}  OUT OF SYNC", s.height)
+            }
+        })
         .unwrap_or_else(|| "locked".into());
     let title = format!(" xmrtui · {} · {sync} ", app.wallet_name);
     let tabs = Tabs::new(titles.iter().copied().map(Line::from))
@@ -63,17 +69,39 @@ fn draw_tabs(frame: &mut Frame, app: &App, area: Rect) {
 fn draw_dashboard(frame: &mut Frame, app: &App, area: Rect) {
     let inner = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(8), Constraint::Min(3)])
+        .constraints([Constraint::Length(9), Constraint::Min(3)])
         .split(area);
 
-    let (balance, unlocked, address, height) = match &app.snapshot {
-        Some(s) => (
-            format_xmr(s.balance),
-            format_xmr(s.unlocked),
-            s.address.clone(),
-            s.height.to_string(),
+    let (balance, unlocked, address, height, daemon_state, daemon_style) = match &app.snapshot {
+        Some(s) => {
+            let (state, style) = if s.daemon_ok {
+                (
+                    format!("{}  ok", app.daemon),
+                    Style::default().fg(Color::Green),
+                )
+            } else {
+                (
+                    format!("{}  UNREACHABLE", app.daemon),
+                    Style::default().fg(Color::Red),
+                )
+            };
+            (
+                format_xmr(s.balance),
+                format_xmr(s.unlocked),
+                s.address.clone(),
+                s.height.to_string(),
+                state,
+                style,
+            )
+        }
+        None => (
+            "—".into(),
+            "—".into(),
+            "—".into(),
+            "—".into(),
+            app.daemon.clone(),
+            Style::default(),
         ),
-        None => ("—".into(), "—".into(), "—".into(), "—".into()),
     };
 
     let info = Paragraph::new(vec![
@@ -96,7 +124,7 @@ fn draw_dashboard(frame: &mut Frame, app: &App, area: Rect) {
         ]),
         Line::from(vec![
             Span::styled("daemon    ", Style::default().fg(Color::DarkGray)),
-            Span::raw(app.daemon.clone()),
+            Span::styled(daemon_state, daemon_style),
         ]),
         Line::from(vec![
             Span::styled("rpc       ", Style::default().fg(Color::DarkGray)),

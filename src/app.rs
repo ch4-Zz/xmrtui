@@ -1,9 +1,7 @@
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::rpc::{
-    Snapshot, TransferRow, WalletRpc, fetch_snapshot, format_xmr, open_wallet, send_xmr,
-};
+use crate::rpc::{Snapshot, TransferRow, WalletRpc, format_xmr, open_wallet, send_xmr};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -59,6 +57,7 @@ pub struct App {
     pub confirm_text: String,
     chord: Chord,
     pub unlocked: bool,
+    pub want_refresh: bool,
 }
 
 impl App {
@@ -82,6 +81,7 @@ impl App {
             confirm_text: String::new(),
             chord: Chord::None,
             unlocked: false,
+            want_refresh: false,
         }
     }
 
@@ -98,9 +98,9 @@ impl App {
             Ok(()) => {
                 self.unlocked = true;
                 self.mode = Mode::Normal;
-                self.status = "wallet unlocked".into();
+                self.status = "wallet unlocked — connecting daemon…".into();
                 self.error = None;
-                self.reload().await;
+                self.request_refresh();
             }
             Err(err) => {
                 self.error = Some(err.to_string());
@@ -112,24 +112,45 @@ impl App {
         Ok(())
     }
 
-    pub async fn reload(&mut self) {
-        self.busy = true;
-        self.status = "refresh…".into();
-        match fetch_snapshot(&self.rpc.client).await {
+    pub fn request_refresh(&mut self) {
+        if self.unlocked {
+            self.want_refresh = true;
+            self.busy = true;
+            self.status = "refresh…".into();
+        }
+    }
+
+    pub fn apply_snapshot(&mut self, result: Result<Snapshot, String>) {
+        self.busy = false;
+        self.want_refresh = false;
+        match result {
             Ok(snap) => {
                 if self.selected >= snap.transfers.len() {
                     self.selected = snap.transfers.len().saturating_sub(1);
                 }
+                if !snap.daemon_ok {
+                    self.error = snap.daemon_error.clone();
+                    self.status = "daemon unreachable — solde en cache, pas de nouveaux txs".into();
+                } else if snap.received_money {
+                    self.error = None;
+                    self.status = format!(
+                        "incoming XMR  +{} blocks  height {}",
+                        snap.blocks_fetched, snap.height
+                    );
+                } else {
+                    self.error = None;
+                    self.status = format!(
+                        "synced  +{} blocks  height {}",
+                        snap.blocks_fetched, snap.height
+                    );
+                }
                 self.snapshot = Some(snap);
-                self.error = None;
-                self.status = "synced".into();
             }
             Err(err) => {
-                self.error = Some(err.to_string());
+                self.error = Some(err);
                 self.status = "refresh failed".into();
             }
         }
-        self.busy = false;
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> KeyAction {
@@ -421,7 +442,7 @@ impl App {
                 self.error = None;
                 self.status = format!("sent  txid {txid}");
                 self.send_amount.clear();
-                self.reload().await;
+                self.request_refresh();
             }
             Err(err) => {
                 self.error = Some(err.to_string());
@@ -516,7 +537,7 @@ pub async fn apply_action(app: &mut App, action: KeyAction) -> Result<Outcome> {
             Ok(Outcome::Continue)
         }
         KeyAction::Reload => {
-            app.reload().await;
+            app.request_refresh();
             Ok(Outcome::Continue)
         }
         KeyAction::Yank => {

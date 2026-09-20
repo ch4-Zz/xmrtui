@@ -29,7 +29,7 @@ impl WalletRpc {
             .arg(format!("--rpc-bind-port={port}"))
             .arg("--disable-rpc-login")
             .arg(format!("--daemon-address={daemon_address}"))
-            .arg("--log-level=0")
+            .arg("--log-level=1")
             .arg(format!("--log-file={}", log_file.display()))
             .kill_on_drop(true)
             .stdin(std::process::Stdio::null())
@@ -117,6 +117,10 @@ pub struct Snapshot {
     pub unlocked: Amount,
     pub height: u64,
     pub transfers: Vec<TransferRow>,
+    pub daemon_ok: bool,
+    pub blocks_fetched: u64,
+    pub received_money: bool,
+    pub daemon_error: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -138,7 +142,18 @@ pub async fn open_wallet(client: &WalletClient, filename: &str, password: &str) 
 }
 
 pub async fn fetch_snapshot(client: &WalletClient) -> Result<Snapshot> {
-    let _ = client.refresh(None).await;
+    let (daemon_ok, blocks_fetched, received_money, daemon_error) =
+        match tokio::time::timeout(Duration::from_secs(20), client.refresh(None)).await {
+            Ok(Ok(data)) => (true, data.blocks_fetched, data.received_money, None),
+            Ok(Err(err)) => (false, 0, false, Some(err.to_string())),
+            Err(_) => (
+                false,
+                0,
+                false,
+                Some("refresh timed out (daemon unreachable?)".into()),
+            ),
+        };
+
     let height = client.get_height().await.map(|h| h.get()).unwrap_or(0);
     let address = client
         .get_address(0, None)
@@ -157,6 +172,7 @@ pub async fn fetch_snapshot(client: &WalletClient) -> Result<Snapshot> {
         GetTransfersCategory::Pending,
         GetTransfersCategory::Failed,
         GetTransfersCategory::Pool,
+        GetTransfersCategory::Block,
     ] {
         categories.insert(cat, true);
     }
@@ -192,6 +208,10 @@ pub async fn fetch_snapshot(client: &WalletClient) -> Result<Snapshot> {
         unlocked,
         height,
         transfers,
+        daemon_ok,
+        blocks_fetched,
+        received_money,
+        daemon_error,
     })
 }
 
@@ -253,6 +273,16 @@ pub fn split_wallet_path(path: &Path) -> Result<(PathBuf, String)> {
         .map(Path::to_path_buf)
         .context("wallet path has no parent directory")?;
     Ok((dir, filename))
+}
+
+pub fn default_daemon_address() -> String {
+    let local: std::net::SocketAddr = "127.0.0.1:18081".parse().expect("static addr");
+    if std::net::TcpStream::connect_timeout(&local, Duration::from_millis(200)).is_ok() {
+        "127.0.0.1:18081".into()
+    } else {
+        // node.moneroworld.com no longer resolves; Seth's public node is a stable default.
+        "node.sethforprivacy.com:18089".into()
+    }
 }
 
 pub fn format_xmr(amount: Amount) -> String {
