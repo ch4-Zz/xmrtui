@@ -104,16 +104,26 @@ fn draw_dashboard(frame: &mut Frame, app: &App, area: Rect) {
         ),
     };
 
+    let mut balance_spans = vec![
+        Span::styled("balance   ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            format!("{balance} XMR"),
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ];
+    if let Some(s) = &app.snapshot
+        && let Some(usd) = app.usd_for_pico(s.balance.as_pico())
+    {
+        balance_spans.push(Span::styled(
+            format!("  ({usd})"),
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+
     let info = Paragraph::new(vec![
-        Line::from(vec![
-            Span::styled("balance   ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                format!("{balance} XMR"),
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]),
+        Line::from(balance_spans),
         Line::from(vec![
             Span::styled("unlocked  ", Style::default().fg(Color::DarkGray)),
             Span::raw(format!("{unlocked} XMR")),
@@ -267,6 +277,7 @@ keys
   :balance  print balances
   :transfers
   :send <addr> <amount>
+  tab       complete :command  (S-tab reverse)
 
 the wallet file never leaves the official binary.
 ";
@@ -305,10 +316,17 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
 
 fn draw_cmdline(frame: &mut Frame, app: &App, area: Rect) {
     if app.mode == Mode::Command {
-        frame.render_widget(
-            Paragraph::new(format!(":{}", app.command)).style(Style::default().fg(Color::Yellow)),
-            area,
-        );
+        let mut spans = vec![Span::styled(
+            format!(":{}", app.command),
+            Style::default().fg(Color::Yellow),
+        )];
+        if let Some(hint) = &app.completion_hint {
+            spans.push(Span::styled(
+                format!("  {hint}"),
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+        frame.render_widget(Paragraph::new(Line::from(spans)), area);
         return;
     }
     if let Some(err) = &app.error {

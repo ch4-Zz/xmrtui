@@ -1,6 +1,7 @@
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use crate::price;
 use crate::rpc::{Snapshot, TransferRow, WalletRpc, format_xmr, open_wallet, send_xmr};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,9 +56,12 @@ pub struct App {
     pub send_amount: String,
     pub send_field: SendField,
     pub confirm_text: String,
+    pub completion_hint: Option<String>,
     chord: Chord,
+    tab: Option<TabCompletion>,
     pub unlocked: bool,
     pub want_refresh: bool,
+    pub xmr_usd: Option<f64>,
 }
 
 impl App {
@@ -79,10 +83,17 @@ impl App {
             send_amount: String::new(),
             send_field: SendField::Address,
             confirm_text: String::new(),
+            completion_hint: None,
             chord: Chord::None,
+            tab: None,
             unlocked: false,
             want_refresh: false,
+            xmr_usd: None,
         }
+    }
+
+    pub fn usd_for_pico(&self, pico: u64) -> Option<String> {
+        self.xmr_usd.map(|price| price::xmr_pico_usd(pico, price))
     }
 
     pub fn selected_transfer(&self) -> Option<&TransferRow> {
@@ -313,9 +324,19 @@ impl App {
             KeyCode::Esc => {
                 self.mode = Mode::Normal;
                 self.command.clear();
+                self.clear_completion();
+                KeyAction::None
+            }
+            KeyCode::Tab => {
+                self.apply_completion(false);
+                KeyAction::None
+            }
+            KeyCode::BackTab => {
+                self.apply_completion(true);
                 KeyAction::None
             }
             KeyCode::Backspace => {
+                self.clear_completion();
                 if self.command.is_empty() {
                     self.mode = Mode::Normal;
                 } else {
@@ -327,14 +348,28 @@ impl App {
                 let cmd = self.command.clone();
                 self.command.clear();
                 self.mode = Mode::Normal;
+                self.clear_completion();
                 self.run_command(&cmd)
             }
             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.clear_completion();
                 self.command.push(c);
                 KeyAction::None
             }
             _ => KeyAction::None,
         }
+    }
+
+    fn apply_completion(&mut self, reverse: bool) {
+        if let Some(next) = complete_colon_command(&self.command, &mut self.tab, reverse) {
+            self.command = next;
+            self.completion_hint = completion_hint(&self.tab);
+        }
+    }
+
+    fn clear_completion(&mut self) {
+        self.tab = None;
+        self.completion_hint = None;
     }
 
     fn handle_confirm(&mut self, key: KeyEvent) -> KeyAction {
@@ -370,8 +405,12 @@ impl App {
             "balance" => {
                 self.view = View::Dashboard;
                 if let Some(s) = &self.snapshot {
+                    let usd = self
+                        .usd_for_pico(s.balance.as_pico())
+                        .map(|v| format!(" ({v})"))
+                        .unwrap_or_default();
                     self.status = format!(
-                        "balance {}  unlocked {}",
+                        "balance {}{usd}  unlocked {}",
                         format_xmr(s.balance),
                         format_xmr(s.unlocked)
                     );
@@ -517,6 +556,125 @@ pub enum KeyAction {
     DoSend,
 }
 
+const COMMANDS: &[&str] = &[
+    "address",
+    "balance",
+    "bn",
+    "bp",
+    "h",
+    "help",
+    "history",
+    "q",
+    "q!",
+    "quit",
+    "redraw",
+    "refresh",
+    "send",
+    "sync",
+    "tabn",
+    "tabp",
+    "transfers",
+];
+
+struct TabCompletion {
+    matches: Vec<&'static str>,
+    index: Option<usize>,
+}
+
+fn complete_colon_command(
+    current: &str,
+    state: &mut Option<TabCompletion>,
+    reverse: bool,
+) -> Option<String> {
+    if current.chars().any(char::is_whitespace) {
+        return None;
+    }
+
+    if let Some(tab) = state {
+        let n = tab.matches.len();
+        if n == 0 {
+            return None;
+        }
+        let next = match tab.index {
+            None => {
+                if reverse {
+                    n - 1
+                } else {
+                    0
+                }
+            }
+            Some(i) => {
+                if reverse {
+                    (i + n - 1) % n
+                } else {
+                    (i + 1) % n
+                }
+            }
+        };
+        tab.index = Some(next);
+        return Some(tab.matches[next].to_string());
+    }
+
+    let matches: Vec<&'static str> = COMMANDS
+        .iter()
+        .copied()
+        .filter(|cmd| cmd.starts_with(current))
+        .collect();
+
+    if matches.is_empty() {
+        return None;
+    }
+    if matches.len() == 1 {
+        return Some(pad_if_send(matches[0]));
+    }
+
+    let common = longest_common_prefix(&matches);
+    if !reverse && common.len() > current.len() {
+        *state = Some(TabCompletion {
+            matches,
+            index: None,
+        });
+        return Some(common);
+    }
+
+    let index = if reverse { matches.len() - 1 } else { 0 };
+    let line = matches[index].to_string();
+    *state = Some(TabCompletion {
+        matches,
+        index: Some(index),
+    });
+    Some(line)
+}
+
+fn completion_hint(state: &Option<TabCompletion>) -> Option<String> {
+    state.as_ref().map(|tab| tab.matches.join("  "))
+}
+
+fn pad_if_send(cmd: &str) -> String {
+    if cmd == "send" {
+        format!("{cmd} ")
+    } else {
+        cmd.to_string()
+    }
+}
+
+fn longest_common_prefix(items: &[&str]) -> String {
+    let Some(first) = items.first() else {
+        return String::new();
+    };
+    let mut end = first.len();
+    for item in items.iter().skip(1) {
+        end = first
+            .as_bytes()
+            .iter()
+            .zip(item.as_bytes())
+            .take_while(|(a, b)| a == b)
+            .count()
+            .min(end);
+    }
+    first[..end].to_string()
+}
+
 fn truncate(s: &str, keep: usize) -> String {
     if s.len() <= keep * 2 + 3 {
         s.to_string()
@@ -552,5 +710,90 @@ pub async fn apply_action(app: &mut App, action: KeyAction) -> Result<Outcome> {
             app.do_send().await;
             Ok(Outcome::Continue)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tab(current: &str, state: &mut Option<TabCompletion>) -> String {
+        complete_colon_command(current, state, false).expect("completion")
+    }
+
+    #[test]
+    fn unique_prefix_completes() {
+        let mut state = None;
+        assert_eq!(tab("ref", &mut state), "refresh");
+        assert!(state.is_none());
+    }
+
+    #[test]
+    fn send_gets_a_trailing_space() {
+        let mut state = None;
+        assert_eq!(tab("sen", &mut state), "send ");
+    }
+
+    #[test]
+    fn ambiguous_prefix_cycles() {
+        let mut state = None;
+        assert_eq!(tab("re", &mut state), "redraw");
+        assert_eq!(
+            complete_colon_command("redraw", &mut state, false).as_deref(),
+            Some("refresh")
+        );
+        assert_eq!(
+            complete_colon_command("refresh", &mut state, false).as_deref(),
+            Some("redraw")
+        );
+    }
+
+    #[test]
+    fn shift_tab_cycles_backwards() {
+        let mut state = None;
+        assert_eq!(
+            complete_colon_command("q", &mut state, true).as_deref(),
+            Some("quit")
+        );
+        assert_eq!(
+            complete_colon_command("quit", &mut state, true).as_deref(),
+            Some("q!")
+        );
+        assert_eq!(
+            complete_colon_command("q!", &mut state, true).as_deref(),
+            Some("q")
+        );
+    }
+
+    #[test]
+    fn shared_prefix_fills_then_cycles() {
+        let mut state = None;
+        assert_eq!(tab("ta", &mut state), "tab");
+        assert_eq!(
+            complete_colon_command("tab", &mut state, false).as_deref(),
+            Some("tabn")
+        );
+        assert_eq!(
+            complete_colon_command("tabn", &mut state, false).as_deref(),
+            Some("tabp")
+        );
+    }
+
+    #[test]
+    fn does_not_complete_arguments() {
+        let mut state = None;
+        assert_eq!(complete_colon_command("send 4", &mut state, false), None);
+    }
+
+    #[test]
+    fn unknown_prefix_is_noop() {
+        let mut state = None;
+        assert_eq!(complete_colon_command("xyz", &mut state, false), None);
+    }
+
+    #[test]
+    fn empty_tab_starts_at_first_command() {
+        let mut state = None;
+        assert_eq!(tab("", &mut state), "address");
     }
 }

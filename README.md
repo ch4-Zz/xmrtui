@@ -65,3 +65,4 @@ Password is typed in the TUI, never passed on the command line.
 | `:refresh` | rescan |
 | `:send <addr> <amount>` | transfer (asks `y/n`) |
 | `:q` | quit |
+| `Tab` / `S-Tab` (in `:`) | complete / cycle commands |

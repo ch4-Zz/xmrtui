@@ -1,4 +1,5 @@
 mod app;
+mod price;
 mod rpc;
 mod ui;
 
@@ -67,7 +68,10 @@ async fn run_tui(app: &mut App) -> Result<()> {
     let mut events = EventStream::new();
     let mut ticks = interval(Duration::from_secs(5));
     ticks.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut price_ticks = interval(Duration::from_secs(60));
+    price_ticks.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut inflight: Option<tokio::task::JoinHandle<anyhow::Result<rpc::Snapshot>>> = None;
+    let mut price_inflight: Option<tokio::task::JoinHandle<anyhow::Result<f64>>> = None;
     let result = loop {
         terminal.draw(|frame| ui::draw(frame, app))?;
 
@@ -97,6 +101,11 @@ async fn run_tui(app: &mut App) -> Result<()> {
                     app.request_refresh();
                 }
             }
+            _ = price_ticks.tick() => {
+                if price_inflight.is_none() {
+                    price_inflight = Some(tokio::spawn(price::fetch_xmr_usd()));
+                }
+            }
             res = async {
                 if let Some(handle) = inflight.as_mut() {
                     handle.await
@@ -108,6 +117,18 @@ async fn run_tui(app: &mut App) -> Result<()> {
                 match res {
                     Ok(snap) => app.apply_snapshot(snap.map_err(|err| err.to_string())),
                     Err(err) => app.apply_snapshot(Err(err.to_string())),
+                }
+            }
+            res = async {
+                if let Some(handle) = price_inflight.as_mut() {
+                    handle.await
+                } else {
+                    pending().await
+                }
+            } => {
+                price_inflight = None;
+                if let Ok(Ok(price)) = res {
+                    app.xmr_usd = Some(price);
                 }
             }
         }
